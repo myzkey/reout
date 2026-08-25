@@ -109,6 +109,30 @@ reout show 42 | rg timeout
 
 ## Design Notes
 
+### Architecture
+
+The implementation follows a clean architecture style:
+
+```text
+src/
+  domain/          Core entities such as captured command output
+  application/     Use cases and ports, independent from SQLite, PTY, and clap
+  infrastructure/  SQLite, PTY command runner, clipboard, paths, ANSI stripping
+  presentation/    clap CLI, shell init scripts, terminal table formatting
+  main.rs          Thin process entrypoint
+```
+
+Dependency direction:
+
+```text
+presentation -> application -> domain
+infrastructure -> application -> domain
+```
+
+The application layer depends on traits such as `CommandRepository`,
+`CommandRunner`, `Clipboard`, and `OutputSanitizer`. SQLite, PTY, and `pbcopy`
+are adapters behind those ports.
+
 ### 1. Shell Integration
 
 zsh exposes ZLE widgets that can replace the accepted line before the shell

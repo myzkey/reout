@@ -105,6 +105,28 @@ reout show 42 | rg timeout
 
 ## 設計メモ
 
+### アーキテクチャ
+
+実装はクリーンアーキテクチャ寄りに分割しています。
+
+```text
+src/
+  domain/          captured command outputなどの中核エンティティ
+  application/     ユースケースとport。SQLite、PTY、clapには依存しない
+  infrastructure/  SQLite、PTY command runner、clipboard、paths、ANSI stripping
+  presentation/    clap CLI、shell init script、terminal table formatting
+  main.rs          薄いprocess entrypoint
+```
+
+依存方向:
+
+```text
+presentation -> application -> domain
+infrastructure -> application -> domain
+```
+
+application層は `CommandRepository`、`CommandRunner`、`Clipboard`、`OutputSanitizer` といったtraitに依存します。SQLite、PTY、`pbcopy` はそれらのportを実装するadapterです。
+
 ### 1. Shell Integration
 
 zshのZLE widgetを使うと、シェルが実行する前の入力行を置き換えられます。MVPでは独自の `accept-line` widgetを入れ、次のような入力:
