@@ -15,10 +15,6 @@ pub fn print_entries(entries: &[CommandEntry]) {
     }
 }
 
-pub fn print_find_results(entries: &[CommandEntry]) {
-    print_entries(entries);
-}
-
 fn one_line(value: &str, max: usize) -> String {
     let value = value.replace('\n', " ");
     if value.chars().count() <= max {

@@ -37,7 +37,18 @@ zsh integrationを有効化:
 eval "$(reout init zsh)"
 ```
 
-有効化後、zshで通常通り入力したコマンドは透過的に `reout capture -- <command>` 経由で実行されます。`reout` 自身のコマンドはキャプチャ対象から除外されます。
+有効化後、zshで通常通り入力したコマンドは透過的に `reout` 経由へ振り分けられます。`reout` 自身のコマンドはキャプチャ対象から除外されます。
+
+zsh integrationには2つのキャプチャ経路があります。
+
+- 外部コマンドはPTYを使う `reout capture -- <command>` 経由で実行します。
+- 現在のshellに定義されたalias/functionは現在のzshプロセス内で実行し、`reout import` で保存します。
+
+一時的に無効化:
+
+```bash
+REOUT_DISABLED=1
+```
 
 ## 使い方
 
@@ -89,12 +100,41 @@ reout find kubectl
 reout find "terraform plan"
 ```
 
+履歴を絞り込み:
+
+```bash
+reout --failed
+reout --cwd .
+reout --since 1d
+reout --last cargo
+reout list --failed --since 1w
+```
+
+構造化出力:
+
+```bash
+reout --json
+reout --md
+reout list --json
+reout show 42 --md
+```
+
+簡易error行抽出:
+
+```bash
+reout --errors
+reout --errors -c
+```
+
 削除:
 
 ```bash
 reout delete 42
 reout clear
+reout prune --older-than 30d
 ```
+
+retentionを設定している場合、capture/importのたびに自動pruneも実行されます。
 
 通常のUnix CLIとしてパイプできます。
 
@@ -143,11 +183,13 @@ reout capture -- any-command
 
 これにより、ユーザーが毎回 `reout run ...` のようなラッパーコマンドを手入力する必要を避けています。
 
+integrationは `cd`、`export`、`alias`、`source`、`jobs`、`fg`、background jobなどのshell状態に関わるコマンドをスキップします。これらはcapture proxyではなく、現在のshellで実行される必要があります。また、通常のターミナル利用を壊さないため、`vim`、`less`、`top`、`ssh`、`fzf`、`tmux`、`screen` などのfull-screenまたはsession-orientedな対話コマンドもスキップします。
+
 ### 2. PTY Proxy
 
 stdinがターミナルの場合、`reout capture` は疑似ターミナルを開き、`$SHELL -lc <command>` でコマンドを実行します。PTYから読んだ出力を実ターミナルへ転送しつつ、同じバイト列をSQLiteへ保存します。
 
-単純なstdout redirectよりも、TTY前提のCLIの挙動を保ちやすい構成です。`SIGWINCH` によるterminal resizeを転送し、stdinはraw modeにしてCtrl+CやCtrl+ZをPTY側へ通します。
+単純なstdout redirectよりも、TTY前提のCLIの挙動を保ちやすい構成です。`SIGWINCH` によるterminal resizeを転送し、stdinはraw modeにします。Ctrl+Cは転送され、exit code `130` として保存されます。Ctrl+Zは `reout capture` 配下でproxyが停止状態のまま固まらないよう、Ctrl+C相当に変換します。
 
 ### 3. stdout / stderr の順序
 
@@ -170,7 +212,7 @@ docker compose logs -f
 kubectl logs -f
 ```
 
-長時間動く対話セッションは大きな履歴レコードを作る可能性があります。retentionとignore設定は今後実装予定です。
+長時間動く対話セッションは大きな履歴レコードを作る可能性があります。保存したくないコマンドにはignore ruleとretention pruningを使います。
 
 ### 5. SQLite Schema
 
@@ -196,7 +238,7 @@ preexec/precmd hookだけではコマンド実行後の出力を取得できな�
 
 `reout` はキャプチャした出力を外部へ送信しません。`reout` が所有するデータベースディレクトリはprivate permissionで作成し、Unix環境ではDBファイルを `0600` にします。
 
-将来の設定案:
+設定形式:
 
 ```toml
 [ignore]
@@ -208,30 +250,63 @@ commands = [
 
 [retention]
 max_age = "30d"
-max_bytes = "1GB"
+max_entries = 1000
+max_bytes = "1gb"
+
+[capture]
+max_output_bytes = "10mb"
 ```
 
 ## 既知の制約
 
-- 対話中のzshに定義されたaliasやfunctionは、常に直接実行時と完全に同じ挙動になるとは限りません。キャプチャ対象コマンドは `$SHELL -lc` 経由で実行されます。
+- 現在のshellに定義されたalias/functionは非PTYのimport経路で対応します。この経路ではalias/function解決を維持できますが、stdoutはTTYとして見えません。
 - MVPでは `stdout` と `stderr` を別々には保存しません。
 - クリップボードコピーは現時点ではmacOSの `pbcopy` を使います。
-- retention policyは未実装です。大きなコマンド出力は手動削除するまで残ります。
+- 透明なshell integrationはzshのみです。`reout init bash` と `reout init fish` は未実装であることを明示します。
+- `--errors` は保存済みoutputに対する単純な行filterです。stderr抽出ではありません。
 
-## 将来のコマンド
+## ローカル検証済み
 
-現在のschemaとコマンドモデルは、次のような拡張を想定しています。
+- `cargo check`
+- `cargo test`
+- `cargo clippy -- -D warnings`
+- 非TTYでのcapture、直前出力、offset出力、list、find、plain output
+- 対話zsh integrationでの `cd`、`echo`、`reout --plain`、`reout list`
+- 対話zsh integrationでの現在shellのalias/function
+- PTY stdin forwardingを `cat` で確認
+- Ctrl+C forwardingを `sleep 10` で確認
+- Ctrl+Z hang avoidanceを `sleep 10` で確認
+- `REOUT_CONFIG` によるconfig ignore pattern
+- JSON、Markdown、failed、cwd、since、last、errors、prune commands
+
+## Config
+
+default config path:
 
 ```bash
-reout --failed
-reout --cwd .
-reout --since 1d
-reout --last cargo
-reout --last terraform
-reout --json
-reout --md
-reout --errors
+reout config-path
+```
+
+設定例:
+
+```toml
+[ignore]
+commands = [
+  "reout*",
+  "cat .env*",
+  "aws configure*"
+]
+
+[retention]
+max_age = "30d"
+```
+
+retentionを手動実行:
+
+```bash
 reout prune
 ```
 
-`--last terraform` はTerraform専用パーサではなく、任意コマンドに使えるcommand prefixまたはsubstring検索として扱う方針です。
+設定済みretentionは `reout capture` と `reout import` の後にも自動適用されます。
+
+`--last terraform` はTerraform専用パーサではなく、任意コマンドに使えるcommand substring検索です。
