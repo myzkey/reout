@@ -4,7 +4,7 @@ use std::thread;
 
 use anyhow::{Context, Result};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
-use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use portable_pty::{CommandBuilder, ExitStatus, PtySize, native_pty_system};
 use signal_hook::consts::signal::SIGWINCH;
 use signal_hook::iterator::Signals;
 
@@ -72,6 +72,11 @@ fn run_command(command: &str) -> Result<(CommandOutput, i32)> {
             if n == 0 {
                 break;
             }
+            for byte in &mut buf[..n] {
+                if *byte == 0x1a {
+                    *byte = 0x03;
+                }
+            }
             writer.write_all(&buf[..n])?;
             writer.flush()?;
         }
@@ -98,13 +103,33 @@ fn run_command(command: &str) -> Result<(CommandOutput, i32)> {
     let _ = stdin_thread.thread().id();
     let _ = resize_thread.thread().id();
 
-    let exit_code = status.exit_code() as i32;
+    let exit_code = exit_code_from_status(&status);
     let output = Arc::try_unwrap(output)
         .map_err(|_| anyhow::anyhow!("output still shared"))?
         .into_inner()
         .map_err(|_| anyhow::anyhow!("output lock poisoned"))?;
 
     Ok((CommandOutput::new(output), exit_code))
+}
+
+fn exit_code_from_status(status: &ExitStatus) -> i32 {
+    if let Some(signal) = status.signal() {
+        let signal = signal.to_ascii_lowercase();
+        if signal.contains("interrupt") || signal.contains("sigint") {
+            return 130;
+        }
+        if signal.contains("quit") || signal.contains("sigquit") {
+            return 131;
+        }
+        if signal.contains("terminated") || signal.contains("sigterm") {
+            return 143;
+        }
+        if signal.contains("hangup") || signal.contains("sighup") {
+            return 129;
+        }
+    }
+
+    status.exit_code() as i32
 }
 
 fn run_without_pty(command: &str) -> Result<(CommandOutput, i32)> {
@@ -155,5 +180,35 @@ impl RawModeGuard {
 impl Drop for RawModeGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_common_signal_statuses_to_shell_exit_codes() {
+        assert_eq!(
+            exit_code_from_status(&ExitStatus::with_signal("Interrupt: 2")),
+            130
+        );
+        assert_eq!(
+            exit_code_from_status(&ExitStatus::with_signal("Quit: 3")),
+            131
+        );
+        assert_eq!(
+            exit_code_from_status(&ExitStatus::with_signal("Terminated: 15")),
+            143
+        );
+        assert_eq!(
+            exit_code_from_status(&ExitStatus::with_signal("Hangup: 1")),
+            129
+        );
+    }
+
+    #[test]
+    fn keeps_normal_exit_code() {
+        assert_eq!(exit_code_from_status(&ExitStatus::with_exit_code(7)), 7);
     }
 }

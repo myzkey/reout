@@ -39,9 +39,20 @@ Enable zsh integration:
 eval "$(reout init zsh)"
 ```
 
-After that, ordinary commands accepted from zsh are transparently rewritten to
-run through `reout capture -- <command>`. `reout` commands themselves are not
-captured.
+After that, ordinary commands accepted from zsh are transparently routed through
+`reout`. `reout` commands themselves are not captured.
+
+The zsh integration uses two capture paths:
+
+- External commands run through `reout capture -- <command>`, which uses a PTY.
+- Current-shell aliases and functions run in the current zsh process and are
+  saved through `reout import`.
+
+Temporarily disable integration:
+
+```bash
+REOUT_DISABLED=1
+```
 
 ## Usage
 
@@ -93,12 +104,42 @@ reout find kubectl
 reout find "terraform plan"
 ```
 
+Filter history:
+
+```bash
+reout --failed
+reout --cwd .
+reout --since 1d
+reout --last cargo
+reout list --failed --since 1w
+```
+
+Structured output:
+
+```bash
+reout --json
+reout --md
+reout list --json
+reout show 42 --md
+```
+
+Extract simple error lines:
+
+```bash
+reout --errors
+reout --errors -c
+```
+
 Delete:
 
 ```bash
 reout delete 42
 reout clear
+reout prune --older-than 30d
 ```
+
+Retention is also applied automatically after each captured or imported command
+when configured.
 
 Pipe like a normal Unix command:
 
@@ -150,6 +191,12 @@ reout capture -- any-command
 
 This avoids requiring the user to type `reout run ...` manually.
 
+The integration skips shell-state commands such as `cd`, `export`, `alias`,
+`source`, `jobs`, `fg`, and background jobs. Those commands must run in the
+current shell, not through the capture proxy. It also skips full-screen or
+session-oriented interactive commands such as `vim`, `less`, `top`, `ssh`,
+`fzf`, `tmux`, and `screen` to avoid breaking normal terminal use.
+
 ### 2. PTY proxy
 
 When stdin is a terminal, `reout capture` opens a pseudo-terminal and runs the
@@ -158,7 +205,9 @@ terminal while recording the same byte stream into SQLite.
 
 This preserves the behavior of TTY-aware programs better than stdout
 redirection. Terminal resize is forwarded with `SIGWINCH`, and stdin is put in
-raw mode so Ctrl+C and Ctrl+Z travel through the PTY line discipline.
+raw mode. Ctrl+C is forwarded and recorded as exit code `130`. Ctrl+Z is mapped
+to Ctrl+C inside `reout capture` so captured commands do not leave the proxy
+hung in a stopped state.
 
 ### 3. stdout and stderr order
 
@@ -183,8 +232,8 @@ docker compose logs -f
 kubectl logs -f
 ```
 
-Long-running interactive sessions can produce very large records. Retention and
-ignore rules are planned but not yet implemented.
+Long-running interactive sessions can produce very large records. Use ignore
+rules and retention pruning for commands whose output should not be kept.
 
 ### 5. SQLite schema
 
@@ -214,7 +263,7 @@ cannot capture output after the fact.
 with private permissions where `reout` owns the directory, and the database file
 is chmodded to `0600` on Unix platforms.
 
-Planned config shape:
+Config shape:
 
 ```toml
 [ignore]
@@ -226,34 +275,70 @@ commands = [
 
 [retention]
 max_age = "30d"
-max_bytes = "1GB"
+max_entries = 1000
+max_bytes = "1gb"
+
+[capture]
+max_output_bytes = "10mb"
 ```
 
 ## Known Limitations
 
-- zsh aliases and functions from the current interactive shell may not always
-  behave exactly like direct execution because captured commands are run via
-  `$SHELL -lc`.
+- Current-shell aliases and functions are supported through a non-PTY import
+  path. That path preserves alias/function resolution, but commands on that path
+  do not see stdout as a TTY.
 - `stdout` and `stderr` are not stored separately in the MVP.
 - Clipboard copy currently uses macOS `pbcopy`.
-- There is no retention policy yet, so large command outputs remain until
-  deleted manually.
+- zsh is the only transparent shell integration. `reout init bash` and
+  `reout init fish` intentionally report that they are not implemented yet.
+- `--errors` is a simple line filter over captured output. It is not stderr
+  extraction.
 
-## Future Commands
+## Verified Locally
 
-The schema and command model leave room for:
+- `cargo check`
+- `cargo test`
+- `cargo clippy -- -D warnings`
+- Non-TTY capture, latest output, offset output, list, find, and plain output
+- Interactive zsh integration with `cd`, `echo`, `reout --plain`, and
+  `reout list`
+- Interactive zsh integration with current-shell aliases and functions
+- PTY stdin forwarding with `cat`
+- Ctrl+C forwarding with `sleep 10`
+- Ctrl+Z hang avoidance with `sleep 10`
+- Config ignore patterns with `REOUT_CONFIG`
+- JSON, Markdown, failed, cwd, since, last, errors, and prune commands
+
+## Config
+
+Default config path:
 
 ```bash
-reout --failed
-reout --cwd .
-reout --since 1d
-reout --last cargo
-reout --last terraform
-reout --json
-reout --md
-reout --errors
+reout config-path
+```
+
+Example:
+
+```toml
+[ignore]
+commands = [
+  "reout*",
+  "cat .env*",
+  "aws configure*"
+]
+
+[retention]
+max_age = "30d"
+```
+
+Run retention manually:
+
+```bash
 reout prune
 ```
 
-`--last terraform` should stay a generic command-prefix or substring search,
-not Terraform-specific parsing.
+Configured retention is also enforced automatically after `reout capture` and
+`reout import`.
+
+`--last terraform` is a generic command substring search, not
+Terraform-specific parsing.

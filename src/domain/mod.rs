@@ -1,3 +1,5 @@
 mod command_entry;
 
-pub use command_entry::{CapturedCommand, CommandEntry, CommandOutput};
+pub use command_entry::{
+    CapturePolicy, CapturedCommand, CommandEntry, CommandOutput, HistoryQuery, RetentionPolicy,
+};
